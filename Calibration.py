@@ -28,6 +28,7 @@ class Calibration(object):
         self.imgpoints_r = []  # 2d points in image plane.
 
         self.cal_path = filepath
+        # self.test_path = rebuildpath
 
     def show(self, img):
         cv2.namedWindow('img', 0)
@@ -47,7 +48,6 @@ class Calibration(object):
         for i in trange(len(images_left)):
             img_l = cv2.imread(images_left[i])
             img_r = cv2.imread(images_right[i])
-
             gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)
             gray_r = cv2.cvtColor(img_r, cv2.COLOR_BGR2GRAY)
 
@@ -94,6 +94,13 @@ class Calibration(object):
             self.objpoints, self.imgpoints_l,
             self.imgpoints_r, self.M1, self.d1, self.M2,
             self.d2, dims, criteria=self.criteria_stereo, flags=flags)
+
+        self.R = R
+        self.T = T
+        self.M1 = M1
+        self.d1 = d1
+        self.M2 = M2
+        self.d2 = d2
 
         camera_model = dict([('M1', np.asarray(M1).tolist()), 
                             ('M2', np.asarray(M2).tolist()),
@@ -152,6 +159,48 @@ class Calibration(object):
             plt.title('After Undistortion')
             plt.show()
 
+    def getRectifyTransformation(self):
+        h = self.img_shape[1]
+        w = self.img_shape[0]
+        R1, R2, P1, P2, Q, roi1, roi2 = cv2.stereoRectify(
+            self.M1, self.d1, self.M2, self.d2, (w, h), self.R, self.T, alpha=0)
+        map1x, map1y = cv2.initUndistortRectifyMap(self.M1, self.d1, R1, P1, (w, h), cv2.CV_32FC1)
+        map2x, map2y = cv2.initUndistortRectifyMap(self.M2, self.d2, R2, P2, (w, h), cv2.CV_32FC1)
+
+        return map1x, map1y, map2x, map2y, Q
+
+    def rectify(self, test_path, display):
+        image_test = glob.glob(test_path + '*.jpg')  # images waited to be rectified
+        image1 = cv2.imread(image_test[0])
+        image2 = cv2.imread(image_test[1])
+
+        map1x, map1y, map2x, map2y, Q = self.getRectifyTransformation()
+        rectified_img1 = cv2.remap(image1, map1x, map1y, cv2.INTER_AREA)
+        rectified_img2 = cv2.remap(image2, map2x, map2y, cv2.INTER_AREA)
+
+        self.image1 = rectified_img1
+        self.image2 = rectified_img2
+
+        if display:
+            plt.subplot(121)
+            plt.imshow(image1)
+            plt.title('Left image (after rectify)')
+            plt.subplot(122)
+            plt.imshow(image2)
+            plt.title('Right image (after rectify)')
+            plt.show()
+
+        if display:
+            plt.subplot(121)
+            plt.imshow(rectified_img1)
+            plt.title('Left image (after rectify)')
+            plt.subplot(122)
+            plt.imshow(rectified_img2)
+            plt.title('Right image (after rectify)')
+            plt.show()
+
+        return rectified_img1, rectified_img2
+
     def test_monocular(self):
         # reconstruct from 3D to 2D
         total_error_l = 0
@@ -166,6 +215,45 @@ class Calibration(object):
         print("---------- Monocular projection error ----------")
         print("total error left: ", total_error_l / len(self.objpoints))
         print("total error right: ", total_error_r / len(self.objpoints))
+
+    def update(self, val=0):
+        # Updating the parameters based on the trackbar positions
+        numDisparities = cv2.getTrackbarPos('numDisparities','disp')
+        blockSize = cv2.getTrackbarPos('blockSize','disp')
+        preFilterCap = cv2.getTrackbarPos('preFilterCap','disp')
+        uniquenessRatio = cv2.getTrackbarPos('uniquenessRatio','disp')
+        speckleRange = cv2.getTrackbarPos('speckleRange','disp')
+        speckleWindowSize = cv2.getTrackbarPos('speckleWindowSize','disp')
+        disp12MaxDiff = cv2.getTrackbarPos('disp12MaxDiff','disp')
+        minDisparity = cv2.getTrackbarPos('minDisparity','disp')
+        self.stereo.setNumDisparities(numDisparities)
+        self.stereo.setBlockSize(blockSize)
+        self.stereo.setPreFilterCap(preFilterCap)
+        self.stereo.setUniquenessRatio(uniquenessRatio)
+        self.stereo.setSpeckleRange(speckleRange)
+        self.stereo.setSpeckleWindowSize(speckleWindowSize)
+        self.stereo.setDisp12MaxDiff(disp12MaxDiff)
+        self.stereo.setMinDisparity(minDisparity)
+
+        disparity = self.stereo.compute(self.image1, self.image2)
+        disparity = disparity.astype(np.float32)
+        disparity = (disparity/16.0 - minDisparity)/numDisparities
+        cv2.imshow("disp",disparity)
+
+    def sgbm(self):
+        cv2.namedWindow('disp')
+        cv2.createTrackbar('numDisparities','disp',100,400,self.update)
+        cv2.createTrackbar('blockSize','disp',1,50,self.update)
+        cv2.createTrackbar('preFilterCap','disp',5,62,self.update)
+        cv2.createTrackbar('uniquenessRatio','disp',0,40,self.update)
+        cv2.createTrackbar('speckleRange','disp',0,30,self.update)
+        cv2.createTrackbar('speckleWindowSize','disp',0,30,self.update)
+        cv2.createTrackbar('disp12MaxDiff','disp',0,100,self.update)
+        cv2.createTrackbar('minDisparity','disp',0,25,self.update)
+
+        self.stereo = cv2.StereoSGBM_create()
+        self.update()
+        cv2.waitKey(0)
 
     def test_stereo(self):
         # project from 3D to 2D
@@ -248,9 +336,14 @@ class Calibration(object):
         self.hand_eye_calibrate()
         self.test_hand_eye()
 
+        # Rectify and rebuild
+        rectifyed_img1, rectifyed_img2 = self.rectify(self.test_path, display)
+        disp = self.sgbm()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--filepath', default='./pics/', help='String Filepath')
+    parser.add_argument('--rebuildpath', default='./test/', help='String Filepath')
     parser.add_argument('--seed', default=12, help='Choose a view to undistort')
     parser.add_argument('--display', action='store_true', help='Show images')
     args = parser.parse_args()
